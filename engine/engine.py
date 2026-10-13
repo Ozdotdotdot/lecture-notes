@@ -67,22 +67,37 @@ def video_info(url):
             "date": d.get("upload_date") or ""}
 
 
-def download_audio(info, job):
+def download_audio(info, job, attempts=3):
     out = job / "audio.m4a"
     if out.exists():
         return out
-    proc = subprocess.Popen(["yt-dlp", "--no-warnings", "--no-playlist", "--newline", "-f", "bestaudio",
-                             "-x", "--audio-format", "m4a", "-o", str(job / "audio.%(ext)s"), info["url"]],
-                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
-    tail = []
-    for line in proc.stdout:
-        tail = (tail + [line])[-20:]
-        m = re.search(r"\[download\]\s+([\d.]+)%", line)
-        if m:
-            emit("downloading", float(m.group(1)) / 100)
-    if proc.wait() != 0 or not out.exists():
-        raise RuntimeError("Downloading the video failed.\n\n" + "".join(tail)[-500:])
-    return out
+    log = job / "download.log"
+    # YouTube sometimes offers only an HLS (m3u8) stream that fails mid-way; prefer plain
+    # https audio, and retry, since a fresh request usually gets the normal formats back.
+    fmt = "bestaudio[protocol^=http][protocol!*=m3u8]/bestaudio/best"
+    for attempt in range(1, attempts + 1):
+        for f in job.glob("audio.*"):
+            f.unlink()
+        with open(log, "a") as lf:
+            lf.write(f"--- attempt {attempt}\n")
+            proc = subprocess.Popen(["yt-dlp", "--no-warnings", "--no-playlist", "--newline", "--retries", "5",
+                                     "-f", fmt, "-x", "--audio-format", "m4a", "-o", str(job / "audio.%(ext)s"),
+                                     info["url"]], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+            tail = []
+            for line in proc.stdout:
+                m = re.search(r"\[download\]\s+([\d.]+)%", line)
+                if m:
+                    emit("downloading", float(m.group(1)) / 100)
+                else:
+                    lf.write(line)
+                    tail = (tail + [line])[-8:]
+        if proc.wait() == 0 and out.exists():
+            return out
+        if attempt < attempts:
+            emit("downloading", 0.0, message=f"Download hiccup, retrying ({attempt + 1}/{attempts})…")
+            time.sleep(5 * attempt)
+    errors = [l for l in tail if "ERROR" in l] or tail
+    raise RuntimeError("Downloading the video failed. Please try again in a few minutes.\n\n" + "".join(errors)[-400:])
 
 
 def transcribe(audio, info, job):
