@@ -181,8 +181,9 @@ def write_notes(info, segs, job):
 
         threading.Thread(target=tick, daemon=True).start()
         try:
-            r = run(["opencode", "run", "--standalone", "-m", model, "-f", "transcript.txt", prompt],
-                    cwd=job, timeout=900)
+            # opencode resolves -f against $PWD, not the process cwd, so pass an absolute path.
+            r = run(["opencode", "run", "--standalone", "-m", model, "-f", str(job / "transcript.txt"), prompt],
+                    cwd=job, env={**os.environ, "PWD": str(job)}, timeout=900)
         except subprocess.TimeoutExpired:
             errors.append(f"{model}: timed out")
             continue
@@ -269,7 +270,12 @@ def main(url):
     emit("writing", 1.0)
 
     emit("saving", 0.5)
-    pdf = OUTPUT / f"{safe_name(info['title'])}.pdf"
+    # Name the PDF after the notes' English heading; YouTube titles are cluttered.
+    heading = re.match(r"#\s+(.+)", notes)
+    base = safe_name(heading.group(1).strip("*_ ") if heading else info["title"])
+    pdf, n = OUTPUT / f"{base}.pdf", 2
+    while pdf.exists():
+        pdf, n = OUTPUT / f"{base} ({n}).pdf", n + 1
     render_pdf(notes, pdf, info["title"], info["url"])
     audio.unlink(missing_ok=True)  # keep transcript + notes, drop the big audio file
     emit("done", 1.0, pdf=str(pdf), title=info["title"])
